@@ -29,11 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         r#"
         CREATE TABLE IF NOT EXISTS webhook_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-            event_type TEXT,
-            sender_login TEXT,
             payload TEXT,
-            received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            repository_name TEXT
+            received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         "#
     ).execute(&pool)
@@ -69,11 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn webhook(State(pool): State<SqlitePool>, payload: Json<Value>) -> impl IntoResponse {
     sqlx::query(
         r#"
-        INSERT INTO webhook_events (event_type, sender_login, payload, received_at, repository_name) VALUES (?, ?, ?, ?, ?)
+        INSERT INTO webhook_events (payload, received_at) VALUES (?, ?)
         "#
     )
-    .bind(payload.get("event_type").and_then(|v| v.as_str()).unwrap_or("unknown"))
-    .bind(payload.get("sender_login").and_then(|v| v.as_str()).unwrap_or("unknown"))
     .bind(payload.to_string())
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(&pool)
@@ -85,20 +80,17 @@ async fn webhook(State(pool): State<SqlitePool>, payload: Json<Value>) -> impl I
 }
 
 async fn events(State(pool): State<SqlitePool>) -> impl IntoResponse {
-    let events = sqlx::query_as::<_, (i64, Option<String>, Option<String>, String, String, Option<String>)>(
-        "SELECT id, event_type, sender_login, payload, received_at, repository_name FROM webhook_events ORDER BY received_at DESC LIMIT 50"
+    let events = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT id, payload, received_at FROM webhook_events ORDER BY received_at DESC LIMIT 50"
     )
     .fetch_all(&pool)
     .await
     .unwrap();
 
-    let formatted: Vec<_> = events.into_iter().map(|(id, event_type, sender, payload, received_at, repo)| {
+    let formatted: Vec<_> = events.into_iter().map(|(id, payload, received_at)| {
         json!({
             "id": id,
-            "event_type": event_type,
-            "sender_login": sender,
             "received_at": received_at,
-            "repository_name": repo,
             "payload": payload.parse::<Value>().unwrap_or(json!({}))
         })
     }).collect();
