@@ -1,5 +1,5 @@
 use axum::{
-    error_handling::HandleErrorLayer, extract::State, http::StatusCode, response::{IntoResponse, Json}, routing::{get, post}, Router
+    error_handling::HandleErrorLayer, extract::State, http::{header, HeaderMap, StatusCode}, response::{IntoResponse, Json}, routing::{get, post}, Router
 };
 use serde_json::{Value, json};
 use serde::{Deserialize, Serialize};
@@ -12,9 +12,17 @@ use std::{
 };
 use sqlx::sqlite::SqlitePool;
 use chrono::Utc;
+use std::env;
+use dotenv::dotenv;
+use sha2::Sha256;
+use hmac::{Hmac, Mac};
+use axum::response::Response;
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok();
+    
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -63,20 +71,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn webhook(State(pool): State<SqlitePool>, payload: Json<Value>) -> impl IntoResponse {
+async fn webhook(State(pool): State<SqlitePool>, headers: HeaderMap, body: String) -> Response {
+    let secret = env::var("WEBHOOK_SECRET").expect("WEBHOOK_SECRET not set");
+    let signature = match headers.get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok()) {
+            Some(sig) => sig,
+            None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing signature"}))).into_response()
+        };
+
+    
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body.as_bytes());
+    let expected = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+    
+    if signature != expected {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid signature"}))).into_response();
+    }
+
     sqlx::query(
         r#"
         INSERT INTO webhook_events (payload, received_at) VALUES (?, ?)
         "#
     )
-    .bind(payload.to_string())
+    .bind(&body)
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(&pool)
     .await
     .unwrap();
     
-    info!("payload recieved");
-    Json(json!({"status": "received"}))
+    info!("request processed successfully");
+    (StatusCode::OK, Json(json!({"status": "payload received"}))).into_response()
 }
 
 async fn events(State(pool): State<SqlitePool>) -> impl IntoResponse {
@@ -95,5 +119,9 @@ async fn events(State(pool): State<SqlitePool>) -> impl IntoResponse {
         })
     }).collect();
 
+    
+    info!("request processed successfully");
     Json(json!({"events": formatted, "count": formatted.len()}))
 }
+
+// secret key: webhooksecretkey9876543210
